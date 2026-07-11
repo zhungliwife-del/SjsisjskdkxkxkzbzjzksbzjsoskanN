@@ -214,9 +214,19 @@ async function api(path, options = {}) {
 
 // --------------------------------------------------------------- spotify ---
 
+// Spotify's search endpoint returns HTTP 400 on unbalanced quotes and broken
+// field-filter syntax ("artist:", "year:"), which LLMs love to produce.
+function sanitizeQuery(query) {
+    return String(query || '')
+        .replace(/["'«»“”{}\[\]:;`~|\\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 100);
+}
+
 async function searchTracks(query) {
     const res = await api(`/search?type=track&limit=12&q=${encodeURIComponent(query)}`);
-    if (!res.ok) throw new Error(`Spotify search failed (HTTP ${res.status})`);
+    if (!res.ok) throw new Error(`Spotify search failed (HTTP ${res.status}) for "${query}"`);
     const data = await res.json();
     const tracks = (data.tracks?.items || []).map(t => ({
         uri: t.uri,
@@ -492,9 +502,8 @@ function parseMood(raw) {
             }
         } catch { /* fall through */ }
     }
-    // Fallback: use the raw reply as a search query.
-    const fallback = text.trim().split('\n')[0].slice(0, 100);
-    return fallback ? { mood: 'vibe', energy: 5, query: fallback, reason: '' } : null;
+    // Fallback handled by the caller (keyword engine in auto mode).
+    return null;
 }
 
 async function analyzeAndPlay({ force = false, hint = '' } = {}) {
@@ -540,6 +549,11 @@ async function analyzeAndPlay({ force = false, hint = '' } = {}) {
         }
         if (!mood?.query) {
             status('Could not determine a vibe from the scene.');
+            return;
+        }
+        mood.query = sanitizeQuery(mood.query);
+        if (!mood.query) {
+            status('Mood query was empty after sanitizing — try /vibe with a manual query.');
             return;
         }
         if (!force && currentTrack && currentMood?.query &&
