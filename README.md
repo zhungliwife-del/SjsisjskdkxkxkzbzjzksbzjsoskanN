@@ -7,9 +7,14 @@ inside the chat** — with album art, mood label, and playback controls.
 
 ## Features
 
-- 🧠 **Automatic mood detection** — every N character messages the LLM quietly analyzes
+- 🧠 **Automatic mood detection** — every N character messages the extension analyzes
   the recent scene and produces a mood + a Spotify search query (e.g.
-  `dark ambient tension drone` or `epic orchestral battle choir`).
+  `dark ambient tension drone` or `epic orchestral battle choir`). Three engines:
+  - **LLM with keyword fallback** (default) — asks your connected LLM with a tiny raw
+    prompt; if the API fails or times out, falls back to the built-in keyword engine.
+  - **LLM only** — no fallback.
+  - **Keywords only** — fully offline mood detection (English + Russian keywords),
+    zero LLM calls. Use this if your API is slow or rate-limited.
 - 🎶 **Self-directed music search** — the extension searches Spotify and starts playback
   on your active device. If the vibe hasn't changed, the current track keeps playing.
 - 💬 **In-chat info block** — a compact card appears inside the latest character message:
