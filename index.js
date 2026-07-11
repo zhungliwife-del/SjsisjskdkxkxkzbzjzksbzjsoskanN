@@ -13,7 +13,9 @@ const defaultSettings = {
     autoMode: true,
     inlineBlock: true,
     keepOldBlocks: false,
-    preferInstrumental: true,
+    preferInstrumental: true, // legacy, superseded by musicStyle
+    musicStyle: 'auto', // 'auto' | 'modern' | 'soundtrack'
+    useFandom: true,
     moodEngine: 'auto', // 'auto' (LLM → keyword fallback) | 'llm' | 'keywords'
     messageInterval: 2,
     minSecondsBetween: 45,
@@ -204,17 +206,30 @@ async function api(path, options = {}) {
 // --------------------------------------------------------------- spotify ---
 
 async function searchTracks(query) {
-    const res = await api(`/search?type=track&limit=8&q=${encodeURIComponent(query)}`);
+    const res = await api(`/search?type=track&limit=12&q=${encodeURIComponent(query)}`);
     if (!res.ok) throw new Error(`Spotify search failed (HTTP ${res.status})`);
     const data = await res.json();
-    return (data.tracks?.items || []).map(t => ({
+    const tracks = (data.tracks?.items || []).map(t => ({
         uri: t.uri,
         name: t.name,
         artists: (t.artists || []).map(a => a.name).join(', '),
         album: t.album?.name || '',
         image: t.album?.images?.[1]?.url || t.album?.images?.[0]?.url || '',
         url: t.external_urls?.spotify || '',
+        popularity: Number(t.popularity) || 0,
     }));
+    return rankTracks(tracks);
+}
+
+// Rank by Spotify popularity so well-known/current tracks and official OSTs win
+// over obscure covers; heavily penalize karaoke/tribute junk.
+const JUNK_RE = /karaoke|tribute|8[- ]?bit|lullab|music box|kids|parody|made famous|in the style of|караоке/i;
+function rankTracks(tracks) {
+    return [...tracks].sort((a, b) => {
+        const scoreA = a.popularity - (JUNK_RE.test(`${a.name} ${a.artists} ${a.album}`) ? 60 : 0);
+        const scoreB = b.popularity - (JUNK_RE.test(`${b.name} ${b.artists} ${b.album}`) ? 60 : 0);
+        return scoreB - scoreA;
+    });
 }
 
 async function playTrack(track) {
@@ -287,19 +302,40 @@ function getSceneText(maxMessages = 8) {
         .join('\n');
 }
 
-function buildPrompt(sceneText) {
-    const instrumental = settings.preferInstrumental
-        ? 'Prefer instrumental, soundtrack, or ambient music unless lyrics strongly fit the scene.'
-        : '';
-    return `[Pause the roleplay.] You are a film music supervisor. Read the recent roleplay scene below and choose background music that matches its atmosphere.
+function getCardText() {
+    const ctx = getCtx();
+    try {
+        const character = ctx.characters?.[ctx.characterId];
+        if (character?.name) {
+            const description = String(character.description || '').replace(/<[^>]*>/g, ' ').slice(0, 400);
+            return `${character.name}\n${description}`;
+        }
+    } catch { /* group chats / older versions */ }
+    return '';
+}
 
+function buildPrompt(sceneText, cardText) {
+    const styleRules = {
+        modern: 'Prefer modern, popular, well-known songs with vocals that fit the mood (rock, rap, metal, pop, phonk); you may name a specific famous song or artist in the query.',
+        soundtrack: 'Prefer instrumental, soundtrack, or ambient music unless lyrics strongly fit the scene.',
+        auto: 'Use famous popular songs when the scene fits them, and cinematic/instrumental music otherwise.',
+    };
+    const styleRule = styleRules[settings.musicStyle] || styleRules.auto;
+    const fandomRule = settings.useFandom
+        ? 'If the roleplay is clearly set in a well-known franchise (game / anime / movie / book — e.g. Genshin Impact, Harry Potter, Naruto, The Witcher), set "fandom" to its name and make the query target its official soundtrack, themes, or openings (e.g. "Genshin Impact OST battle", "Harry Potter theme", "Naruto opening"). Otherwise set "fandom" to null.'
+        : 'Set "fandom" to null.';
+    return `[Pause the roleplay.] You are a film music supervisor. Read the roleplay scene below and choose background music that matches its atmosphere.
+${cardText ? `\nCHARACTER CARD:\n${cardText}\n` : ''}
 SCENE:
 ${sceneText}
 
 Respond with ONLY a single JSON object and nothing else, in exactly this shape:
-{"mood":"1-3 word mood label","energy":5,"query":"Spotify track search query","reason":"very short explanation"}
+{"mood":"1-3 word mood label","energy":5,"fandom":"franchise name or null","query":"Spotify track search query","reason":"very short explanation"}
 
-Rules for "query": describe MUSIC, not the plot — genre + adjectives + optional era/style keywords (e.g. "dark ambient tension drone", "upbeat swing jazz playful", "epic orchestral battle choir"). Never mention character names. ${instrumental}`;
+Rules:
+- ${fandomRule}
+- For "query": describe MUSIC, not the plot — genre + adjectives + optional era/style keywords, or a franchise soundtrack search. Never mention roleplay character names.
+- ${styleRule}`;
 }
 
 async function runQuiet(prompt) {
@@ -340,37 +376,91 @@ function withTimeout(promise, ms, label) {
 
 // Offline mood detection — no LLM calls at all. English + Russian keywords.
 const VIBE_RULES = [
-    { mood: 'epic battle', query: 'epic orchestral battle intense drums choir', words: ['battle', 'fight', 'sword', 'blade', 'gun', 'attack', 'war', 'enemy', 'strike', 'clash', 'punch', 'shoot', 'бой', 'битв', 'драк', 'сраж', 'меч', 'клин', 'оруж', 'атак', 'войн', 'удар', 'враг', 'выстрел'] },
-    { mood: 'horror', query: 'dark ambient horror tension drone', words: ['fear', 'horror', 'terror', 'shadow', 'monster', 'scream', 'creep', 'dread', 'nightmare', 'страх', 'ужас', 'тьм', 'тень', 'монстр', 'крик', 'жутк', 'кошмар', 'мрак'] },
-    { mood: 'passionate', query: 'sensual slow smooth saxophone r&b', words: ['moan', 'passion', 'desire', 'lust', 'undress', 'sensual', 'стон', 'страст', 'желани', 'вожделен', 'постел', 'соблазн'] },
-    { mood: 'romantic', query: 'romantic tender piano strings soft', words: ['kiss', 'love', 'embrace', 'tender', 'blush', 'heart', 'caress', 'gentle', 'поцелу', 'любл', 'любов', 'обним', 'объят', 'нежн', 'сердц', 'ласк', 'романт'] },
-    { mood: 'sorrowful', query: 'sad melancholic piano emotional', words: ['tears', 'cry', 'crying', 'grief', 'loss', 'mourn', 'sorrow', 'weep', 'слез', 'плакал', 'плач', 'горе', 'печал', 'утрат', 'скорб', 'груст'] },
-    { mood: 'mysterious', query: 'suspense noir mysterious tension strings', words: ['mystery', 'secret', 'investigate', 'clue', 'whisper', 'suspicion', 'hidden', 'тайн', 'загадк', 'секрет', 'улик', 'шепот', 'шёпот', 'подозр', 'скрыт'] },
-    { mood: 'magical', query: 'fantasy magical ethereal orchestral mystical', words: ['magic', 'spell', 'wizard', 'ritual', 'arcane', 'enchant', 'маги', 'заклинан', 'волшеб', 'ритуал', 'чар', 'колд'] },
-    { mood: 'adventurous', query: 'cinematic adventure journey folk orchestral', words: ['journey', 'travel', 'forest', 'road', 'mountain', 'explore', 'quest', 'путешеств', 'дорог', 'лес', 'гор', 'странств', 'поход', 'путь'] },
-    { mood: 'festive', query: 'upbeat fun swing dance party', words: ['dance', 'party', 'laugh', 'festival', 'celebrate', 'drink', 'tavern', 'танц', 'вечеринк', 'смех', 'смея', 'праздник', 'весел', 'таверн'] },
-    { mood: 'cozy', query: 'cozy calm acoustic warm lo-fi', words: ['cozy', 'warm', 'tea', 'coffee', 'fireplace', 'rain', 'blanket', 'calm', 'quiet', 'уют', 'тепл', 'чай', 'кофе', 'камин', 'дожд', 'плед', 'спокой', 'тиш'] },
+    { mood: 'epic battle', tag: 'battle', query: 'epic orchestral battle intense drums choir', modern: 'aggressive metal rock battle', words: ['battle', 'fight', 'sword', 'blade', 'gun', 'attack', 'war', 'enemy', 'strike', 'clash', 'punch', 'shoot', 'бой', 'битв', 'драк', 'сраж', 'меч', 'клин', 'оруж', 'атак', 'войн', 'удар', 'враг', 'выстрел'] },
+    { mood: 'horror', tag: 'dark', query: 'dark ambient horror tension drone', modern: 'dark phonk horrorcore', words: ['fear', 'horror', 'terror', 'shadow', 'monster', 'scream', 'creep', 'dread', 'nightmare', 'страх', 'ужас', 'тьм', 'тень', 'монстр', 'крик', 'жутк', 'кошмар', 'мрак'] },
+    { mood: 'passionate', tag: 'sensual', query: 'sensual slow smooth saxophone r&b', modern: 'sensual r&b slow jam', words: ['moan', 'passion', 'desire', 'lust', 'undress', 'sensual', 'стон', 'страст', 'желани', 'вожделен', 'постел', 'соблазн'] },
+    { mood: 'romantic', tag: 'love', query: 'romantic tender piano strings soft', modern: 'romantic pop love song', words: ['kiss', 'love', 'embrace', 'tender', 'blush', 'heart', 'caress', 'gentle', 'поцелу', 'любл', 'любов', 'обним', 'объят', 'нежн', 'сердц', 'ласк', 'романт'] },
+    { mood: 'sorrowful', tag: 'sad', query: 'sad melancholic piano emotional', modern: 'sad emotional ballad', words: ['tears', 'cry', 'crying', 'grief', 'loss', 'mourn', 'sorrow', 'weep', 'слез', 'плакал', 'плач', 'горе', 'печал', 'утрат', 'скорб', 'груст'] },
+    { mood: 'mysterious', tag: 'tension', query: 'suspense noir mysterious tension strings', modern: 'dark trap suspense', words: ['mystery', 'secret', 'investigate', 'clue', 'whisper', 'suspicion', 'hidden', 'тайн', 'загадк', 'секрет', 'улик', 'шепот', 'шёпот', 'подозр', 'скрыт'] },
+    { mood: 'magical', tag: 'magic', query: 'fantasy magical ethereal orchestral mystical', modern: 'ethereal dream pop magical', words: ['magic', 'spell', 'wizard', 'ritual', 'arcane', 'enchant', 'маги', 'заклинан', 'волшеб', 'ритуал', 'чар', 'колд'] },
+    { mood: 'adventurous', tag: 'adventure', query: 'cinematic adventure journey folk orchestral', modern: 'indie rock adventure anthem', words: ['journey', 'travel', 'forest', 'road', 'mountain', 'explore', 'quest', 'путешеств', 'дорог', 'лес', 'гор', 'странств', 'поход', 'путь'] },
+    { mood: 'festive', tag: 'party', query: 'upbeat fun swing dance party', modern: 'party hits dance pop', words: ['dance', 'party', 'laugh', 'festival', 'celebrate', 'drink', 'tavern', 'танц', 'вечеринк', 'смех', 'смея', 'праздник', 'весел', 'таверн'] },
+    { mood: 'cozy', tag: 'calm', query: 'cozy calm acoustic warm lo-fi', modern: 'chill lo-fi indie cozy', words: ['cozy', 'warm', 'tea', 'coffee', 'fireplace', 'rain', 'blanket', 'calm', 'quiet', 'уют', 'тепл', 'чай', 'кофе', 'камин', 'дожд', 'плед', 'спокой', 'тиш'] },
 ];
 
-function keywordMood(sceneText) {
+// Popular RP franchises — when detected, search their official soundtracks instead
+// of generic mood music. Matched against the character card and the scene text.
+const FANDOMS = [
+    { name: 'Genshin Impact', query: 'Genshin Impact OST', words: ['genshin', 'геншин', 'teyvat', 'тейват', 'mondstadt', 'мондштадт', 'liyue', 'лиюэ', 'fontaine', 'фонтейн', 'paimon', 'паймон', 'архонт'] },
+    { name: 'Honkai: Star Rail', query: 'Honkai Star Rail OST', words: ['honkai', 'хонкай', 'star rail', 'астрал экспресс'] },
+    { name: 'Harry Potter', query: 'Harry Potter soundtrack theme', words: ['hogwarts', 'хогвартс', 'harry potter', 'гарри поттер', 'гриффиндор', 'gryffindor', 'слизерин', 'slytherin', 'волдеморт', 'voldemort', 'quidditch', 'квиддич'] },
+    { name: 'Naruto', query: 'Naruto OST', words: ['naruto', 'наруто', 'konoha', 'конох', 'hokage', 'хокаге', 'sharingan', 'шаринган', 'джутсу'] },
+    { name: 'The Witcher', query: 'The Witcher soundtrack', words: ['witcher', 'ведьмак', 'geralt', 'геральт', 'цири', 'ciri', 'каэр морхен'] },
+    { name: 'Cyberpunk 2077', query: 'Cyberpunk 2077 OST', words: ['cyberpunk', 'киберпанк', 'night city', 'найт-сити', 'найт сити', 'arasaka', 'арасак'] },
+    { name: 'Attack on Titan', query: 'Attack on Titan OST', words: ['attack on titan', 'атака титанов', 'shingeki', 'эрен', 'eren yeager', 'разведкорпус'] },
+    { name: 'Demon Slayer', query: 'Demon Slayer OST', words: ['demon slayer', 'kimetsu', 'клинок рассекающ', 'танджиро', 'tanjiro', 'недзуко', 'nezuko'] },
+    { name: 'Jujutsu Kaisen', query: 'Jujutsu Kaisen OST', words: ['jujutsu', 'магическая битва', 'годжо', 'gojo', 'сукуна', 'sukuna', 'проклятая энерги'] },
+    { name: 'My Hero Academia', query: 'My Hero Academia OST', words: ['hero academia', 'геройская академия', 'deku', 'деку', 'юэй', 'quirk', 'причуд'] },
+    { name: 'Star Wars', query: 'Star Wars soundtrack', words: ['star wars', 'звездные войны', 'звёздные войны', 'jedi', 'джеда', 'ситх', 'sith', 'татуин'] },
+    { name: 'Lord of the Rings', query: 'Lord of the Rings soundtrack', words: ['средиземь', 'middle-earth', 'mordor', 'мордор', 'hobbit', 'хоббит', 'gandalf', 'гэндальф', 'гандальф'] },
+    { name: 'Elden Ring', query: 'Elden Ring soundtrack', words: ['elden ring', 'элден', 'dark souls', 'дарк соулс', 'междуземь'] },
+    { name: 'The Elder Scrolls', query: 'Skyrim soundtrack', words: ['skyrim', 'скайрим', 'dovahkiin', 'довакин', 'tamriel', 'тамриэл'] },
+    { name: 'Zelda', query: 'Legend of Zelda soundtrack', words: ['zelda', 'зельда', 'hyrule', 'хайрул'] },
+    { name: 'Undertale', query: 'Undertale OST', words: ['undertale', 'андертейл'] },
+    { name: 'Minecraft', query: 'Minecraft soundtrack C418', words: ['minecraft', 'майнкрафт'] },
+];
+
+function countMatches(text, words) {
+    let score = 0;
+    for (const word of words) {
+        let idx = -1;
+        while ((idx = text.indexOf(word, idx + 1)) !== -1) score++;
+    }
+    return score;
+}
+
+function detectFandom(sceneText, cardText) {
+    if (!settings.useFandom) return null;
+    const scene = sceneText.toLowerCase();
+    const card = (cardText || '').toLowerCase();
+    let best = null;
+    let bestScore = 0;
+    for (const fandom of FANDOMS) {
+        // Card mentions are strong evidence (the whole chat is set there).
+        const score = countMatches(card, fandom.words) * 3 + countMatches(scene, fandom.words);
+        if (score > bestScore) {
+            bestScore = score;
+            best = fandom;
+        }
+    }
+    return bestScore >= 2 ? best : null;
+}
+
+function keywordMood(sceneText, cardText = '') {
     const text = sceneText.toLowerCase();
     let best = null;
     let bestScore = 0;
     for (const rule of VIBE_RULES) {
-        let score = 0;
-        for (const word of rule.words) {
-            let idx = -1;
-            while ((idx = text.indexOf(word, idx + 1)) !== -1) score++;
-        }
+        const score = countMatches(text, rule.words);
         if (score > bestScore) {
             bestScore = score;
             best = rule;
         }
     }
+    const fandom = detectFandom(sceneText, cardText);
+    if (fandom) {
+        return {
+            mood: `${fandom.name}${best ? ` · ${best.mood}` : ''}`,
+            energy: 5,
+            query: `${fandom.query} ${best ? best.tag : ''}`.trim(),
+            reason: 'keyword engine · fandom',
+        };
+    }
     if (!best) {
         return { mood: 'ambient', energy: 4, query: 'cinematic ambient atmospheric instrumental', reason: 'keyword engine · default' };
     }
-    return { mood: best.mood, energy: 5, query: best.query, reason: 'keyword engine' };
+    const query = settings.musicStyle === 'modern' ? best.modern : best.query;
+    return { mood: best.mood, energy: 5, query, reason: 'keyword engine' };
 }
 
 function parseMood(raw) {
@@ -381,8 +471,11 @@ function parseMood(raw) {
         try {
             const parsed = JSON.parse(match[0]);
             if (parsed && typeof parsed.query === 'string' && parsed.query.trim()) {
+                const fandom = parsed.fandom && String(parsed.fandom).toLowerCase() !== 'null'
+                    ? String(parsed.fandom).slice(0, 40)
+                    : '';
                 return {
-                    mood: String(parsed.mood || 'vibe').slice(0, 60),
+                    mood: `${fandom ? `${fandom} · ` : ''}${String(parsed.mood || 'vibe').slice(0, 60)}`,
                     energy: Number(parsed.energy) || 5,
                     query: parsed.query.trim().slice(0, 120),
                     reason: String(parsed.reason || '').slice(0, 140),
@@ -414,10 +507,11 @@ async function analyzeAndPlay({ force = false, hint = '' } = {}) {
                 return;
             }
             const engine = settings.moodEngine || 'auto';
+            const cardText = getCardText();
             if (engine !== 'keywords') {
                 status('Analyzing the scene mood…');
                 try {
-                    const raw = await withTimeout(runLLM(buildPrompt(scene)), 90_000, 'LLM analysis timed out');
+                    const raw = await withTimeout(runLLM(buildPrompt(scene, cardText)), 90_000, 'LLM analysis timed out');
                     mood = parseMood(raw);
                 } catch (err) {
                     console.warn(LOG, 'LLM mood analysis failed:', err);
@@ -432,7 +526,7 @@ async function analyzeAndPlay({ force = false, hint = '' } = {}) {
                     status('Mood analysis failed: could not parse the LLM reply.');
                     return;
                 }
-                mood = keywordMood(scene);
+                mood = keywordMood(scene, cardText);
             }
         }
         if (!mood?.query) {
@@ -525,7 +619,14 @@ const settingsHtml = `
             <label class="checkbox_label"><input id="rvm_auto" type="checkbox"><span>Auto mode — adapt music to the scene</span></label>
             <label class="checkbox_label"><input id="rvm_inline" type="checkbox"><span>Show "Now playing" block in chat</span></label>
             <label class="checkbox_label"><input id="rvm_keep" type="checkbox"><span>Keep old music blocks in chat</span></label>
-            <label class="checkbox_label"><input id="rvm_instr" type="checkbox"><span>Prefer instrumental / soundtrack music</span></label>
+            <label class="checkbox_label"><input id="rvm_fandom" type="checkbox"><span>Use franchise soundtracks when detected (Genshin, Harry Potter…)</span></label>
+            <label>Music style
+                <select id="rvm_style" class="text_pole">
+                    <option value="auto">Auto — famous songs when they fit, cinematic otherwise</option>
+                    <option value="modern">Modern popular — rock / rap / metal / pop with vocals</option>
+                    <option value="soundtrack">Instrumental / soundtrack only</option>
+                </select>
+            </label>
             <label>Mood engine
                 <select id="rvm_engine" class="text_pole">
                     <option value="auto">LLM with keyword fallback (default)</option>
@@ -562,7 +663,8 @@ function addSettingsUi() {
     $('#rvm_auto').prop('checked', settings.autoMode).on('change', function () { settings.autoMode = this.checked; save(); });
     $('#rvm_inline').prop('checked', settings.inlineBlock).on('change', function () { settings.inlineBlock = this.checked; save(); if (!this.checked) $('#chat .rvm-block').remove(); });
     $('#rvm_keep').prop('checked', settings.keepOldBlocks).on('change', function () { settings.keepOldBlocks = this.checked; save(); });
-    $('#rvm_instr').prop('checked', settings.preferInstrumental).on('change', function () { settings.preferInstrumental = this.checked; save(); });
+    $('#rvm_fandom').prop('checked', settings.useFandom).on('change', function () { settings.useFandom = this.checked; save(); });
+    $('#rvm_style').val(settings.musicStyle || 'auto').on('change', function () { settings.musicStyle = this.value; save(); });
     $('#rvm_engine').val(settings.moodEngine || 'auto').on('change', function () { settings.moodEngine = this.value; save(); });
     $('#rvm_interval').val(settings.messageInterval).on('input', function () { settings.messageInterval = Math.max(1, Number(this.value) || 1); save(); });
     $('#rvm_client_id').val(settings.clientId).on('input', function () { settings.clientId = this.value.trim(); save(); });

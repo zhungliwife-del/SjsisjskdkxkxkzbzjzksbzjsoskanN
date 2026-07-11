@@ -16,7 +16,15 @@ inside the chat** — with album art, mood label, and playback controls.
   - **Keywords only** — fully offline mood detection (English + Russian keywords),
     zero LLM calls. Use this if your API is slow or rate-limited.
 - 🎶 **Self-directed music search** — the extension searches Spotify and starts playback
-  on your active device. If the vibe hasn't changed, the current track keeps playing.
+  on your active device. Results are ranked by popularity (well-known tracks and official
+  OSTs win; karaoke/tribute covers are penalized). If the vibe hasn't changed, the
+  current track keeps playing.
+- 🏰 **Fandom awareness** — if the RP is set in a known franchise (Genshin Impact,
+  Harry Potter, Naruto, The Witcher, Cyberpunk 2077, and more), the extension plays that
+  franchise's official soundtrack/themes instead of generic mood music. Detected both by
+  the LLM and by the offline keyword engine (character card + scene, RU + EN).
+- 🎸 **Music style setting** — Auto (famous songs when they fit), Modern popular
+  (rock / rap / metal / pop with vocals), or Instrumental / soundtrack only.
 - 💬 **In-chat info block** — a compact card appears inside the latest character message:
   album art, mood ("♪ tense — the duel is starting"), track, artist, and buttons:
   play/pause ▸ another track for this vibe ▸ re-analyze the scene.
