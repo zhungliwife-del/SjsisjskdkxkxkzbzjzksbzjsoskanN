@@ -247,7 +247,8 @@ async function playTrack(track) {
 async function togglePlayback() {
     try {
         if (isPlaying) {
-            await api('/me/player/pause', { method: 'PUT' });
+            const res = await api('/me/player/pause', { method: 'PUT' });
+            if (!res.ok && res.status !== 204) throw new Error(`Spotify pause failed (HTTP ${res.status})`);
             isPlaying = false;
         } else if (currentTrack) {
             const res = await api('/me/player/play', { method: 'PUT' });
@@ -272,7 +273,7 @@ async function nextTrack() {
     currentTrack = searchResults[searchIndex];
     const result = await playTrack(currentTrack);
     renderBlock(result.ok ? '' : result.note);
-    status(`Now playing: ${currentTrack.name} — ${currentTrack.artists}`);
+    status(result.ok ? `Now playing: ${currentTrack.name} — ${currentTrack.artists}` : result.note);
 }
 
 // ------------------------------------------------------------ mood engine ---
