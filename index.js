@@ -428,6 +428,10 @@ async function analyzeAndPlay({ force = false, hint = '' } = {}) {
                 }
             }
             if (!mood?.query) {
+                if (engine === 'llm') {
+                    status('Mood analysis failed: could not parse the LLM reply.');
+                    return;
+                }
                 mood = keywordMood(scene);
             }
         }
