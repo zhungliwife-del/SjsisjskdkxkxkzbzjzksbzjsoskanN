@@ -4,7 +4,7 @@
 
 const MODULE = 'rp_vibe_music';
 const LOG = '[RP Vibe Music]';
-const AUTH_STATE = 'rvm_spotify_auth';
+const STATE_KEY = 'rvm_oauth_state';
 const VERIFIER_KEY = 'rvm_pkce_verifier';
 const SCOPES = 'user-read-playback-state user-modify-playback-state user-read-currently-playing';
 
@@ -91,6 +91,8 @@ async function connectSpotify() {
     }
     const verifier = randomString(64);
     localStorage.setItem(VERIFIER_KEY, verifier);
+    const state = `rvm_${randomString(24)}`;
+    localStorage.setItem(STATE_KEY, state);
     const challenge = await sha256base64url(verifier);
     const params = new URLSearchParams({
         client_id: settings.clientId,
@@ -99,7 +101,7 @@ async function connectSpotify() {
         scope: SCOPES,
         code_challenge_method: 'S256',
         code_challenge: challenge,
-        state: AUTH_STATE,
+        state,
     });
     window.location.assign(`https://accounts.spotify.com/authorize?${params}`);
 }
@@ -115,10 +117,17 @@ function disconnectSpotify() {
 
 async function handleAuthCallback() {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('state') !== AUTH_STATE) return;
+    const returnedState = params.get('state') || '';
+    if (!returnedState.startsWith('rvm_')) return; // not our callback
+    const expectedState = localStorage.getItem(STATE_KEY);
+    localStorage.removeItem(STATE_KEY);
     const code = params.get('code');
     const error = params.get('error');
     window.history.replaceState({}, document.title, window.location.pathname);
+    if (!expectedState || returnedState !== expectedState) {
+        status('Spotify authorization failed: state mismatch. Press "Connect Spotify" again.');
+        return;
+    }
     if (error) {
         status(`Spotify authorization failed: ${error}`);
         return;
