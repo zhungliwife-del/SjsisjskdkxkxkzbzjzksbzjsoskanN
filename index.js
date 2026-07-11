@@ -14,6 +14,7 @@ const defaultSettings = {
     inlineBlock: true,
     keepOldBlocks: false,
     preferInstrumental: true,
+    moodEngine: 'auto', // 'auto' (LLM → keyword fallback) | 'llm' | 'keywords'
     messageInterval: 2,
     minSecondsBetween: 45,
     clientId: '',
@@ -312,6 +313,66 @@ async function runQuiet(prompt) {
     return await fn(prompt, false, true);
 }
 
+async function runLLM(prompt) {
+    const ctx = getCtx();
+    // Prefer generateRaw: it sends ONLY our short prompt (no character card, no chat
+    // history), which is much faster and far less likely to hit gateway timeouts.
+    const raw = ctx.generateRaw;
+    if (typeof raw === 'function') {
+        try {
+            if (raw.length <= 1) {
+                return await raw({ prompt, systemPrompt: '' });
+            }
+            return await raw(prompt, null, false, false);
+        } catch (err) {
+            console.warn(LOG, 'generateRaw failed, falling back to quiet prompt:', err);
+        }
+    }
+    return runQuiet(prompt);
+}
+
+function withTimeout(promise, ms, label) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
+    ]);
+}
+
+// Offline mood detection — no LLM calls at all. English + Russian keywords.
+const VIBE_RULES = [
+    { mood: 'epic battle', query: 'epic orchestral battle intense drums choir', words: ['battle', 'fight', 'sword', 'blade', 'gun', 'attack', 'war', 'enemy', 'strike', 'clash', 'punch', 'shoot', 'бой', 'битв', 'драк', 'сраж', 'меч', 'клин', 'оруж', 'атак', 'войн', 'удар', 'враг', 'выстрел'] },
+    { mood: 'horror', query: 'dark ambient horror tension drone', words: ['fear', 'horror', 'terror', 'shadow', 'monster', 'scream', 'creep', 'dread', 'nightmare', 'страх', 'ужас', 'тьм', 'тень', 'монстр', 'крик', 'жутк', 'кошмар', 'мрак'] },
+    { mood: 'passionate', query: 'sensual slow smooth saxophone r&b', words: ['moan', 'passion', 'desire', 'lust', 'undress', 'sensual', 'стон', 'страст', 'желани', 'вожделен', 'постел', 'соблазн'] },
+    { mood: 'romantic', query: 'romantic tender piano strings soft', words: ['kiss', 'love', 'embrace', 'tender', 'blush', 'heart', 'caress', 'gentle', 'поцелу', 'любл', 'любов', 'обним', 'объят', 'нежн', 'сердц', 'ласк', 'романт'] },
+    { mood: 'sorrowful', query: 'sad melancholic piano emotional', words: ['tears', 'cry', 'crying', 'grief', 'loss', 'mourn', 'sorrow', 'weep', 'слез', 'плакал', 'плач', 'горе', 'печал', 'утрат', 'скорб', 'груст'] },
+    { mood: 'mysterious', query: 'suspense noir mysterious tension strings', words: ['mystery', 'secret', 'investigate', 'clue', 'whisper', 'suspicion', 'hidden', 'тайн', 'загадк', 'секрет', 'улик', 'шепот', 'шёпот', 'подозр', 'скрыт'] },
+    { mood: 'magical', query: 'fantasy magical ethereal orchestral mystical', words: ['magic', 'spell', 'wizard', 'ritual', 'arcane', 'enchant', 'маги', 'заклинан', 'волшеб', 'ритуал', 'чар', 'колд'] },
+    { mood: 'adventurous', query: 'cinematic adventure journey folk orchestral', words: ['journey', 'travel', 'forest', 'road', 'mountain', 'explore', 'quest', 'путешеств', 'дорог', 'лес', 'гор', 'странств', 'поход', 'путь'] },
+    { mood: 'festive', query: 'upbeat fun swing dance party', words: ['dance', 'party', 'laugh', 'festival', 'celebrate', 'drink', 'tavern', 'танц', 'вечеринк', 'смех', 'смея', 'праздник', 'весел', 'таверн'] },
+    { mood: 'cozy', query: 'cozy calm acoustic warm lo-fi', words: ['cozy', 'warm', 'tea', 'coffee', 'fireplace', 'rain', 'blanket', 'calm', 'quiet', 'уют', 'тепл', 'чай', 'кофе', 'камин', 'дожд', 'плед', 'спокой', 'тиш'] },
+];
+
+function keywordMood(sceneText) {
+    const text = sceneText.toLowerCase();
+    let best = null;
+    let bestScore = 0;
+    for (const rule of VIBE_RULES) {
+        let score = 0;
+        for (const word of rule.words) {
+            let idx = -1;
+            while ((idx = text.indexOf(word, idx + 1)) !== -1) score++;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            best = rule;
+        }
+    }
+    if (!best) {
+        return { mood: 'ambient', energy: 4, query: 'cinematic ambient atmospheric instrumental', reason: 'keyword engine · default' };
+    }
+    return { mood: best.mood, energy: 5, query: best.query, reason: 'keyword engine' };
+}
+
 function parseMood(raw) {
     if (!raw) return null;
     const text = String(raw).replace(/```(?:json)?/gi, '');
@@ -352,9 +413,23 @@ async function analyzeAndPlay({ force = false, hint = '' } = {}) {
                 status('No messages to analyze yet.');
                 return;
             }
-            status('Analyzing the scene mood…');
-            const raw = await runQuiet(buildPrompt(scene));
-            mood = parseMood(raw);
+            const engine = settings.moodEngine || 'auto';
+            if (engine !== 'keywords') {
+                status('Analyzing the scene mood…');
+                try {
+                    const raw = await withTimeout(runLLM(buildPrompt(scene)), 90_000, 'LLM analysis timed out');
+                    mood = parseMood(raw);
+                } catch (err) {
+                    console.warn(LOG, 'LLM mood analysis failed:', err);
+                    if (engine === 'llm') {
+                        status(`Mood analysis failed: ${err.message}`);
+                        return;
+                    }
+                }
+            }
+            if (!mood?.query) {
+                mood = keywordMood(scene);
+            }
         }
         if (!mood?.query) {
             status('Could not determine a vibe from the scene.');
@@ -447,6 +522,13 @@ const settingsHtml = `
             <label class="checkbox_label"><input id="rvm_inline" type="checkbox"><span>Show "Now playing" block in chat</span></label>
             <label class="checkbox_label"><input id="rvm_keep" type="checkbox"><span>Keep old music blocks in chat</span></label>
             <label class="checkbox_label"><input id="rvm_instr" type="checkbox"><span>Prefer instrumental / soundtrack music</span></label>
+            <label>Mood engine
+                <select id="rvm_engine" class="text_pole">
+                    <option value="auto">LLM with keyword fallback (default)</option>
+                    <option value="llm">LLM only</option>
+                    <option value="keywords">Keywords only — no LLM calls</option>
+                </select>
+            </label>
             <label>Analyze every N character messages
                 <input id="rvm_interval" type="number" min="1" max="20" class="text_pole">
             </label>
@@ -477,6 +559,7 @@ function addSettingsUi() {
     $('#rvm_inline').prop('checked', settings.inlineBlock).on('change', function () { settings.inlineBlock = this.checked; save(); if (!this.checked) $('#chat .rvm-block').remove(); });
     $('#rvm_keep').prop('checked', settings.keepOldBlocks).on('change', function () { settings.keepOldBlocks = this.checked; save(); });
     $('#rvm_instr').prop('checked', settings.preferInstrumental).on('change', function () { settings.preferInstrumental = this.checked; save(); });
+    $('#rvm_engine').val(settings.moodEngine || 'auto').on('change', function () { settings.moodEngine = this.value; save(); });
     $('#rvm_interval').val(settings.messageInterval).on('input', function () { settings.messageInterval = Math.max(1, Number(this.value) || 1); save(); });
     $('#rvm_client_id').val(settings.clientId).on('input', function () { settings.clientId = this.value.trim(); save(); });
     $('#rvm_redirect').val(settings.redirectUri).on('input', function () { settings.redirectUri = this.value.trim(); save(); });
