@@ -225,7 +225,8 @@ function sanitizeQuery(query) {
 }
 
 async function searchTracks(query) {
-    const res = await api(`/search?type=track&limit=12&q=${encodeURIComponent(query)}`);
+    // Dev-mode apps are capped at limit=10 since Spotify's Feb 2026 API changes.
+    const res = await api(`/search?type=track&limit=10&q=${encodeURIComponent(query)}`);
     if (!res.ok) throw new Error(`Spotify search failed (HTTP ${res.status}) for "${query}"`);
     const data = await res.json();
     const tracks = (data.tracks?.items || []).map(t => ({
